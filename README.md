@@ -48,3 +48,8 @@ Ensuite, dans ton navigateur :
 
 À améliorer avec le reste de l'équipe.
 
+
+
+Ok c'est parfait. Ça marche.
+
+Maintenant je veux apporter un truc simple. Je vais t'envoyer la partie du code qui concerne ce que je veux faire. Là pour l'instant 
