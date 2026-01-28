@@ -21,7 +21,7 @@ export async function POST(request: Request) {
     }
 
     // Create user
-    const user = createUser(name, email, password)
+    const user = await createUser(name, email, password)
 
     if (!user) {
       return NextResponse.json(
@@ -31,7 +31,7 @@ export async function POST(request: Request) {
     }
 
     // Create session
-    const session = createSession(user.id)
+    const session = await createSession(user.id)
     await setSessionCookie(session.token)
 
     return NextResponse.json({
