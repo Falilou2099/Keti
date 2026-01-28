@@ -1,27 +1,35 @@
-import os 
+import os
 import re
-from typing import List, Dict
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from azure.core.credentials import AzureKeyCredential
+from typing import Dict
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from azure.ai.formrecognizer import DocumentAnalysisClient
+from azure.core.credentials import AzureKeyCredential
+from mindee import ClientV2, InferenceParameters, BytesInput
+from dotenv import load_dotenv
+load_dotenv()
 
-# Configuration
-AZURE_ENDPOINT = "https://yannnathanstartupweek.cognitiveservices.azure.com"
-AZURE_KEY = "9jy9GAr3lQQmDGQPo9F2pH1cjwXeEyyQEYhdqrRAVVAsxmKQgrlkJQQJ99CAAChHRaEXJ3w3AAALACOGMsv6"
+# ============================================================================
+# CONFIGURATION AZURE (Bloc 1 - Reconnaissance)
+# ============================================================================
+AZURE_ENDPOINT = os.getenv("AZURE_ENDPOINT")
+AZURE_KEY = os.getenv("AZURE_KEY")
 
-# Client Form Recognizer
 doc_client = DocumentAnalysisClient(
     endpoint=AZURE_ENDPOINT,
     credential=AzureKeyCredential(AZURE_KEY)
 )
 
-app = FastAPI()
+# ============================================================================
+# CONFIGURATION MINDEE (Bloc 2 - Extraction)
+# ============================================================================
+MINDEE_API_KEY = "md_vHpPefNVwCpfLdRDMV4F0MBaNMQrO5C9NsojQG8MemI"
+MINDEE_MODEL_ID = "43e3cb6a-aade-4793-bb0b-f448836ac276"
+
+mindee_client = ClientV2(MINDEE_API_KEY)
 
 # ============================================================================
-# CONFIGURATION DES MOTS-CLÉS
+# CONFIGURATION DES MOTS-CLÉS (Bloc 1)
 # ============================================================================
-
-# Mots-clés PRINCIPAUX (au moins un de ces mots doit être présent)
 MAIN_KEYWORDS = {
     "ticket": ["ticket", "reçu", "recu"],
     "facture": ["facture", "invoice"],
@@ -29,39 +37,24 @@ MAIN_KEYWORDS = {
     "ttc": ["ttc", "t.t.c", "t.t.c."]
 }
 
-# Mots-clés SECONDAIRES (renforcent la détection mais pas obligatoires)
 SECONDARY_KEYWORDS = [
-    "total",
-    "montant",
-    "prix",
-    "€",
-    "eur",
-    "carte",
-    "espèces",
-    "especes",
-    "paiement",
-    "merci",
-    "caisse"
+    "total", "montant", "prix", "€", "eur", "carte",
+    "espèces", "especes", "paiement", "merci", "caisse"
 ]
 
+# ============================================================================
+# FONCTIONS DU BLOC 1 : RECONNAISSANCE
+# ============================================================================
 
 def normalize_text(text: str) -> str:
-    """
-    Normalise le texte pour une meilleure détection.
-    - Convertit en minuscules
-    - Enlève les espaces multiples
-    - Garde la ponctuation pour les mots avec points (T.V.A.)
-    """
+    """Normalise le texte pour une meilleure détection."""
     text = text.lower()
-    # Remplacer espaces multiples par un seul espace
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 
 def extract_text_from_image(content: bytes) -> str:
-    """
-    Extrait tout le texte d'une image en utilisant Azure OCR.
-    """
+    """Extrait tout le texte d'une image en utilisant Azure OCR."""
     try:
         poller = doc_client.begin_analyze_document(
             "prebuilt-read",
@@ -80,17 +73,7 @@ def extract_text_from_image(content: bytes) -> str:
 
 
 def find_keywords_in_text(text: str) -> Dict:
-    """
-    Recherche les mots-clés dans le texte extrait.
-    
-    Returns:
-        dict: {
-            "main_keywords_found": list[str],
-            "secondary_keywords_found": list[str],
-            "total_keywords": int,
-            "keyword_details": dict
-        }
-    """
+    """Recherche les mots-clés dans le texte extrait."""
     main_found = []
     keyword_details = {}
     
@@ -98,7 +81,6 @@ def find_keywords_in_text(text: str) -> Dict:
     for category, variants in MAIN_KEYWORDS.items():
         found_variants = []
         for variant in variants:
-            # Recherche avec regex pour matcher le mot entier ou avec ponctuation
             pattern = r'\b' + re.escape(variant) + r'\b'
             if re.search(pattern, text, re.IGNORECASE):
                 found_variants.append(variant)
@@ -123,29 +105,15 @@ def find_keywords_in_text(text: str) -> Dict:
 
 
 def calculate_receipt_score(keyword_result: Dict, text_length: int) -> Dict:
-    """
-    Calcule un score de confiance basé sur plusieurs critères.
-    
-    Critères :
-    1. Présence de mots-clés principaux (poids: 70%)
-    2. Présence de mots-clés secondaires (poids: 20%)
-    3. Longueur du texte (poids: 10%)
-    """
+    """Calcule un score de confiance basé sur plusieurs critères."""
     main_count = len(keyword_result["main_keywords_found"])
     secondary_count = len(keyword_result["secondary_keywords_found"])
     
-    # Score basé sur les mots-clés principaux
-    main_score = min(main_count / 2, 1.0) * 0.7  # Au moins 2 mots principaux = score max
-    
-    # Score basé sur les mots-clés secondaires
-    secondary_score = min(secondary_count / 3, 1.0) * 0.2  # Au moins 3 mots secondaires
-    
-    # Score basé sur la longueur du texte (tickets ont généralement du texte)
-    length_score = min(text_length / 100, 1.0) * 0.1  # Au moins 100 caractères
+    main_score = min(main_count / 2, 1.0) * 0.7
+    secondary_score = min(secondary_count / 3, 1.0) * 0.2
+    length_score = min(text_length / 100, 1.0) * 0.1
     
     total_score = main_score + secondary_score + length_score
-    
-    # Décision : au moins 1 mot-clé principal OBLIGATOIRE
     is_receipt = main_count > 0
     
     return {
@@ -156,27 +124,81 @@ def calculate_receipt_score(keyword_result: Dict, text_length: int) -> Dict:
     }
 
 
-@app.post("/check-receipt")
-async def check_receipt(file: UploadFile = File(...)):
+# ============================================================================
+# FONCTION DU BLOC 2 : EXTRACTION DES DONNÉES
+# ============================================================================
+
+def extract_receipt_data(image_content: bytes) -> Dict:
     """
-    Endpoint pour vérifier si une image est un ticket de caisse.
+    Extrait les informations détaillées d'un ticket de caisse avec Mindee.
     
-    RÈGLE DE DÉTECTION :
-    - Au moins UN mot parmi : Ticket, Facture, TVA, TTC
-    - Si trouvé → is_receipt = true
-    - Sinon → is_receipt = false
+    Args:
+        image_content: Contenu binaire de l'image
+        
+    Returns:
+        dict: Données extraites du ticket
+    """
+    try:
+        # Paramètres d'inférence Mindee
+        params = InferenceParameters(
+            model_id=MINDEE_MODEL_ID,
+            rag=None,
+            raw_text=None,
+            polygon=None,
+            confidence=None,
+        )
+        
+        # Utiliser BytesInput au lieu de PathInput pour éviter de sauvegarder le fichier
+        input_source = BytesInput(image_content, filename="ticket.png")
+        
+        # Envoyer pour traitement
+        response = mindee_client.enqueue_and_get_inference(input_source, params)
+        
+        # Extraire les champs
+        fields: dict = response.inference.result.fields
+        
+        return {
+            "success": True,
+            "fields": fields,
+            "raw_inference": str(response.inference)
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+# ============================================================================
+# APPLICATION FASTAPI
+# ============================================================================
+
+app = FastAPI()
+
+
+@app.post("/process-receipt")
+async def process_receipt(file: UploadFile = File(...)):
+    """
+    🎯 ENDPOINT PRINCIPAL : Reconnaissance + Extraction automatique
+    
+    Workflow :
+    1. Vérifie si l'image uploadée est un ticket de caisse (Azure OCR)
+    2. SI c'est un ticket → Extrait les données (Mindee)
+    3. SINON → Retourne un message d'erreur
     
     Returns:
-        {
-            "is_receipt": bool,
+        Si c'est un ticket : {
+            "is_receipt": true,
             "confidence": float,
-            "main_keywords_found": list[str],
-            "secondary_keywords_found": list[str],
-            "keyword_details": dict,
-            "extracted_text_preview": str
+            "extracted_data": {...}
+        }
+        Sinon : {
+            "is_receipt": false,
+            "message": "Ce n'est pas un ticket de caisse"
         }
     """
-    # Validation
+    # ========== VALIDATION ==========
     if not file.content_type.startswith("image/"):
         raise HTTPException(
             status_code=400, 
@@ -189,11 +211,86 @@ async def check_receipt(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Le fichier est vide")
     
     try:
-        # Étape 1 : Extraire le texte
+        # ========== ÉTAPE 1 : RECONNAISSANCE (BLOC 1) ==========
+        print("🔍 Étape 1 : Vérification si l'image est un ticket...")
+        
+        # Extraire le texte avec Azure OCR
         extracted_text = extract_text_from_image(content)
         
         if not extracted_text or len(extracted_text) < 5:
-            # Aucun texte détecté
+            return {
+                "is_receipt": False,
+                "confidence": 0.0,
+                "message": "Aucun texte détecté dans l'image",
+                "extracted_data": None
+            }
+        
+        # Chercher les mots-clés
+        keyword_result = find_keywords_in_text(extracted_text)
+        
+        # Calculer le score
+        score_result = calculate_receipt_score(keyword_result, len(extracted_text))
+        
+        # ========== DÉCISION : Est-ce un ticket ? ==========
+        if not score_result["is_receipt"]:
+            # ❌ CE N'EST PAS UN TICKET
+            return {
+                "is_receipt": False,
+                "confidence": score_result["confidence"],
+                "message": "L'image ne semble pas être un ticket de caisse",
+                "main_keywords_found": keyword_result["main_keywords_found"],
+                "secondary_keywords_found": keyword_result["secondary_keywords_found"],
+                "extracted_data": None
+            }
+        
+        # ========== ÉTAPE 2 : EXTRACTION DES DONNÉES (BLOC 2) ==========
+        print("✅ C'est un ticket ! Extraction des données en cours...")
+        
+        extraction_result = extract_receipt_data(content)
+        
+        # ========== RÉPONSE FINALE ==========
+        return {
+            "is_receipt": True,
+            "confidence": score_result["confidence"],
+            "message": "Ticket de caisse détecté et analysé avec succès",
+            "recognition_details": {
+                "main_keywords_found": keyword_result["main_keywords_found"],
+                "secondary_keywords_found": keyword_result["secondary_keywords_found"],
+                "keyword_details": keyword_result["keyword_details"],
+                "text_preview": extracted_text[:300] + "..." if len(extracted_text) > 300 else extracted_text
+            },
+            "extracted_data": extraction_result,
+            "filename": file.filename
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors du traitement : {str(e)}"
+        )
+
+
+@app.post("/check-receipt")
+async def check_receipt(file: UploadFile = File(...)):
+    """
+    Endpoint pour SEULEMENT vérifier si une image est un ticket (sans extraction).
+    Équivalent au BLOC 1 original.
+    """
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Le fichier doit être une image (reçu : {file.content_type})"
+        )
+    
+    content = await file.read()
+    
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Le fichier est vide")
+    
+    try:
+        extracted_text = extract_text_from_image(content)
+        
+        if not extracted_text or len(extracted_text) < 5:
             return {
                 "is_receipt": False,
                 "confidence": 0.0,
@@ -204,13 +301,9 @@ async def check_receipt(file: UploadFile = File(...)):
                 "message": "Aucun texte détecté dans l'image"
             }
         
-        # Étape 2 : Chercher les mots-clés
         keyword_result = find_keywords_in_text(extracted_text)
-        
-        # Étape 3 : Calculer le score
         score_result = calculate_receipt_score(keyword_result, len(extracted_text))
         
-        # Combiner les résultats
         response = {
             "is_receipt": score_result["is_receipt"],
             "confidence": score_result["confidence"],
@@ -231,41 +324,34 @@ async def check_receipt(file: UploadFile = File(...)):
         )
 
 
-@app.post("/check-receipt-simple")
-async def check_receipt_simple(file: UploadFile = File(...)):
+@app.post("/extract-receipt-data")
+async def extract_only(file: UploadFile = File(...)):
     """
-    Version SIMPLIFIÉE : retourne juste true/false.
+    Endpoint pour SEULEMENT extraire les données d'un ticket (sans vérification).
+    Équivalent au BLOC 2 original.
     
-    Plus rapide si vous n'avez besoin que du résultat binaire.
+    ⚠️ Attention : N'utilise pas ce endpoint si tu n'es pas sûr que c'est un ticket.
+    Utilise plutôt /process-receipt qui fait la vérification automatique.
     """
     if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Le fichier doit être une image.")
+        raise HTTPException(status_code=400, detail="Le fichier doit être une image")
     
     content = await file.read()
     
     try:
-        # Extraire le texte
-        extracted_text = extract_text_from_image(content)
-        
-        # Chercher les mots-clés principaux
-        keyword_result = find_keywords_in_text(extracted_text)
-        
-        # Décision simple : au moins 1 mot-clé principal
-        is_receipt = len(keyword_result["main_keywords_found"]) > 0
-        
-        return {
-            "is_receipt": is_receipt
-        }
+        result = extract_receipt_data(content)
+        return result
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur : {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de l'extraction : {str(e)}"
+        )
 
 
 @app.get("/keywords")
 async def get_keywords():
-    """
-    Retourne la liste des mots-clés surveillés.
-    """
+    """Retourne la liste des mots-clés surveillés."""
     return {
         "main_keywords": MAIN_KEYWORDS,
         "secondary_keywords": SECONDARY_KEYWORDS,
@@ -280,15 +366,21 @@ async def health_check():
     return {
         "status": "ok",
         "main_keywords": main_words,
-        "secondary_keywords_count": len(SECONDARY_KEYWORDS)
+        "secondary_keywords_count": len(SECONDARY_KEYWORDS),
+        "azure_configured": bool(AZURE_ENDPOINT and AZURE_KEY),
+        "mindee_configured": bool(MINDEE_API_KEY)
     }
 
 
+# ============================================================================
+# DÉMARRAGE DU SERVEUR
+# ============================================================================
+
 if __name__ == "__main__":
     import uvicorn
-    print("=" * 60)
-    print("🚀 Serveur FastAPI - Détection de tickets de caisse")
-    print("=" * 60)
+    print("=" * 80)
+    print("🚀 Serveur FastAPI - Reconnaissance et Extraction de tickets de caisse")
+    print("=" * 80)
     print()
     print("📝 RÈGLE DE DÉTECTION :")
     print("   → Au moins UN de ces mots doit être présent :")
@@ -298,59 +390,20 @@ if __name__ == "__main__":
     print("     • TTC (ou T.T.C)")
     print()
     print("✅ Endpoints disponibles :")
-    print("   • POST /check-receipt        → Analyse détaillée")
-    print("   • POST /check-receipt-simple → Réponse true/false")
-    print("   • GET  /keywords             → Voir les mots-clés")
-    print("   • GET  /health               → Status du serveur")
     print()
-    print("=" * 60)
+    print("   🎯 PRINCIPAL (recommandé) :")
+    print("   • POST /process-receipt       → Vérification + Extraction automatique")
+    print()
+    print("   ⚙️  ENDPOINTS SÉPARÉS :")
+    print("   • POST /check-receipt         → Vérification seulement (Bloc 1)")
+    print("   • POST /extract-receipt-data  → Extraction seulement (Bloc 2)")
+    print()
+    print("   📊 UTILITAIRES :")
+    print("   • GET  /keywords              → Voir les mots-clés")
+    print("   • GET  /health                → Status du serveur")
+    print()
+    print("=" * 80)
+    print()
+    print("💡 CONSEIL : Utilise /process-receipt pour tout faire en une seule fois !")
+    print()
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
-# Installation : pip install azure-ai-formrecognizer
-
-
-# Code Mindee commenté (ancien code)
-"""
-from mindee import ClientV2, InferenceParameters, PathInput
-from fastapi import FastAPI
-
-input_path = "ticket1.png"
-api_key = "md_vHpPefNVwCpfLdRDMV4F0MBaNMQrO5C9NsojQG8MemI"
-model_id = "43e3cb6a-aade-4793-bb0b-f448836ac276"
-
-# Init a new client
-mindee_client = ClientV2(api_key)
-
-# Set inference parameters
-params = InferenceParameters(
-    # ID of the model, required.
-    model_id=model_id,
-
-    # Options: set to `True` or `False` to override defaults
-
-    # Enhance extraction accuracy with Retrieval-Augmented Generation.
-    rag=None,
-    # Extract the full text content from the document as strings.
-    raw_text=None,
-    # Calculate bounding box polygons for all fields.
-    polygon=None,
-    # Boost the precision and accuracy of all extractions.
-    # Calculate confidence scores for all fields.
-    confidence=None,
-)
-
-# Load a file from disk
-input_source = PathInput(input_path)
-
-# Send for processing using polling
-response = mindee_client.enqueue_and_get_inference(
-    input_source, params
-)
-
-# Print a brief summary of the parsed data
-print(response.inference)
-
-# Access the result fields
-fields: dict = response.inference.result.fields
-""" 
-

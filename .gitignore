@@ -1,1 +1,25 @@
+# Sécurité : NE JAMAIS PUSH CES FICHIERS
 .env
+*.env
+secrets.json
+
+# Environnement virtuel
+.venv/
+venv/
+env/
+ENV/
+
+# Python (fichiers compilés et cache)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Distribution / Paquets
+dist/
+build/
+*.egg-info/
+
+# Système (macOS / Windows)
+.DS_Store
+Thumbs.db
