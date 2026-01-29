@@ -6,11 +6,11 @@ export function SpendingChart() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Répartition des dépenses</CardTitle>
+        <CardTitle>Répartition des garanties</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="h-40 flex items-center justify-center text-muted-foreground">
-          (Graphique à brancher plus tard)
+          (Graphique par catégorie / date d’expiration à venir)
         </div>
       </CardContent>
     </Card>

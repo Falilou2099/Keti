@@ -2,20 +2,20 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Receipt, ShoppingCart, Coffee, Car } from "lucide-react";
+import { Laptop, ShoppingBag, Car } from "lucide-react";
 
-export function RecentTransactions({ onViewReceipt }: { onViewReceipt: () => void }) {
+export function RecentTransactions() {
   const data = [
-    { merchant: "Carrefour", amount: -87.54, icon: ShoppingCart },
-    { merchant: "Starbucks", amount: -5.9, icon: Coffee },
-    { merchant: "Total", amount: -65, icon: Car },
+    { merchant: "Darty", info: "Garantie jusqu'au 12/2026", icon: Laptop },
+    { merchant: "Fnac", info: "Garantie jusqu'au 05/2025", icon: ShoppingBag },
+    { merchant: "Norauto", info: "Garantie jusqu'au 08/2027", icon: Car },
   ];
 
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle>Transactions récentes</CardTitle>
-        <Button variant="outline" size="sm" onClick={onViewReceipt}>Voir tickets</Button>
+        <CardTitle>Derniers tickets ajoutés</CardTitle>
+        <Button variant="outline" size="sm">Voir tous</Button>
       </CardHeader>
       <CardContent className="space-y-3">
         {data.map((t, i) => (
@@ -24,7 +24,7 @@ export function RecentTransactions({ onViewReceipt }: { onViewReceipt: () => voi
               <t.icon className="w-5 h-5 text-primary" />
               <span>{t.merchant}</span>
             </div>
-            <span className="font-semibold">{t.amount.toFixed(2)} €</span>
+            <span className="text-sm text-muted-foreground">{t.info}</span>
           </div>
         ))}
       </CardContent>
