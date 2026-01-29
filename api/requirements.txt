@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+python-dotenv
+azure-ai-formrecognizer
+mindee
+psycopg2-binary

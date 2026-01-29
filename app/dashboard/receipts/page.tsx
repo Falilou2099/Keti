@@ -1,9 +1,16 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import {
   Search,
@@ -15,6 +22,7 @@ import {
   Store,
   Tag,
 } from "lucide-react";
+import { ReceiptScanner } from "@/components/receipt-scanner";
 
 type WarrantyFilter = "all" | "with" | "without";
 type DateFilter = "7d" | "30d" | "custom";
@@ -28,7 +36,10 @@ type Ticket = {
   hasWarranty: boolean;
 };
 
-function toCurrencyEUR(value: number) {
+function toCurrencyEUR(value: number | null | undefined) {
+  if (value === null || value === undefined || isNaN(value)) {
+    return "0,00 €";
+  }
   return `${value.toFixed(2).replace(".", ",")} €`;
 }
 
@@ -45,13 +56,50 @@ export default function ReceiptsPage() {
   const [customFrom, setCustomFrom] = useState(daysAgo(30));
   const [customTo, setCustomTo] = useState(new Date().toISOString().slice(0, 10));
   const [warrantyFilter, setWarrantyFilter] = useState<WarrantyFilter>("all");
+  const [scannerOpen, setScannerOpen] = useState(false);
+  const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const tickets: Ticket[] = [
-    { id: "1", merchant: "Darty", product: "Aspirateur", amount: 129.99, dateISO: daysAgo(3), hasWarranty: true },
-    { id: "2", merchant: "Fnac", product: "Casque audio", amount: 199, dateISO: daysAgo(12), hasWarranty: true },
-    { id: "3", merchant: "Carrefour", product: "Courses", amount: 54.2, dateISO: daysAgo(2), hasWarranty: false },
-    { id: "4", merchant: "Norauto", product: "Batterie", amount: 149, dateISO: daysAgo(28), hasWarranty: true },
-  ];
+  // Récupérer les tickets depuis la base de données
+  useEffect(() => {
+    const fetchReceipts = async () => {
+      try {
+        setLoading(true);
+        const response = await fetch("/api/receipts");
+        if (!response.ok) {
+          console.error("Erreur API:", response.status, response.statusText);
+          setTickets([]);
+          return;
+        }
+        const data = await response.json();
+
+        // Mapper les données de l'API vers le format attendu par le composant
+        const mappedTickets: Ticket[] = (data.receipts || []).map((receipt: any) => ({
+          id: receipt.id?.toString() || "0",
+          merchant: receipt.merchant_name || "Magasin inconnu",
+          product: receipt.items && receipt.items.length > 0
+            ? receipt.items[0].name || "Produit"
+            : "Divers",
+          amount: parseFloat(receipt.total_amount) || 0,
+          dateISO: receipt.transaction_date
+            ? new Date(receipt.transaction_date).toISOString().slice(0, 10)
+            : receipt.created_at
+            ? new Date(receipt.created_at).toISOString().slice(0, 10)
+            : new Date().toISOString().slice(0, 10),
+          hasWarranty: receipt.has_warranty || false,
+        }));
+
+        setTickets(mappedTickets);
+      } catch (error) {
+        console.error("Erreur lors du chargement des tickets:", error);
+        setTickets([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchReceipts();
+  }, []);
 
   const filteredTickets = useMemo(() => {
     const q = query.toLowerCase();
@@ -64,7 +112,7 @@ export default function ReceiptsPage() {
         t.dateISO.includes(q)
       );
     });
-  }, [query, warrantyFilter]);
+  }, [query, warrantyFilter, tickets]);
 
   return (
     <div className="p-6 space-y-6">
@@ -75,7 +123,7 @@ export default function ReceiptsPage() {
             Rechercher et filtrer vos tickets et garanties
           </p>
         </div>
-        <Button>
+        <Button onClick={() => setScannerOpen(true)}>
           <PlusCircle className="w-4 h-4 mr-2" />
           Ajouter un ticket
         </Button>
@@ -104,24 +152,89 @@ export default function ReceiptsPage() {
           <CardTitle>Liste des tickets</CardTitle>
         </CardHeader>
         <CardContent className="divide-y">
-          {filteredTickets.map((t) => (
-            <div key={t.id} className="flex justify-between items-center py-3">
-              <div>
-                <p className="font-medium">{t.merchant}</p>
-                <p className="text-sm text-muted-foreground">{t.product} – {t.dateISO}</p>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="font-semibold">{toCurrencyEUR(t.amount)}</span>
-                {t.hasWarranty ? (
-                  <ShieldCheck className="text-green-600 w-5 h-5" />
-                ) : (
-                  <ShieldOff className="text-gray-400 w-5 h-5" />
-                )}
-              </div>
+          {loading ? (
+            <div className="py-8 text-center text-muted-foreground">
+              Chargement des tickets...
             </div>
-          ))}
+          ) : filteredTickets.length === 0 ? (
+            <div className="py-8 text-center text-muted-foreground">
+              {query || warrantyFilter !== "all"
+                ? "Aucun ticket ne correspond à vos critères de recherche"
+                : "Aucun ticket trouvé. Scannez votre premier ticket pour commencer !"}
+            </div>
+          ) : (
+            filteredTickets.map((t) => (
+              <div key={t.id} className="flex justify-between items-center py-3">
+                <div>
+                  <p className="font-medium">{t.merchant}</p>
+                  <p className="text-sm text-muted-foreground">{t.product} – {t.dateISO}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="font-semibold">{toCurrencyEUR(t.amount)}</span>
+                  {t.hasWarranty ? (
+                    <ShieldCheck className="text-green-600 w-5 h-5" />
+                  ) : (
+                    <ShieldOff className="text-gray-400 w-5 h-5" />
+                  )}
+                </div>
+              </div>
+            ))
+          )}
         </CardContent>
       </Card>
+
+      {/* Dialog pour scanner un ticket */}
+      <Dialog open={scannerOpen} onOpenChange={(open) => {
+        setScannerOpen(open);
+        // Rafraîchir la liste quand on ferme le scanner
+        if (!open) {
+          const fetchReceipts = async () => {
+            try {
+              setLoading(true);
+              const response = await fetch("/api/receipts");
+              if (!response.ok) {
+                console.error("Erreur API:", response.status);
+                setTickets([]);
+                return;
+              }
+              const data = await response.json();
+
+              const mappedTickets: Ticket[] = (data.receipts || []).map((receipt: any) => ({
+                id: receipt.id?.toString() || "0",
+                merchant: receipt.merchant_name || "Magasin inconnu",
+                product: receipt.items && receipt.items.length > 0
+                  ? receipt.items[0].name || "Produit"
+                  : "Divers",
+                amount: parseFloat(receipt.total_amount) || 0,
+                dateISO: receipt.transaction_date
+                  ? new Date(receipt.transaction_date).toISOString().slice(0, 10)
+                  : receipt.created_at
+                  ? new Date(receipt.created_at).toISOString().slice(0, 10)
+                  : new Date().toISOString().slice(0, 10),
+                hasWarranty: receipt.has_warranty || false,
+              }));
+
+              setTickets(mappedTickets);
+            } catch (error) {
+              console.error("Erreur lors du chargement des tickets:", error);
+              setTickets([]);
+            } finally {
+              setLoading(false);
+            }
+          };
+          fetchReceipts();
+        }
+      }}>
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Scanner un ticket de caisse</DialogTitle>
+            <DialogDescription>
+              Téléchargez une photo de votre ticket pour une analyse IA automatique
+            </DialogDescription>
+          </DialogHeader>
+          <ReceiptScanner />
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

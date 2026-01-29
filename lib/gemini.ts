@@ -4,10 +4,13 @@ import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/ge
  * Interface représentant un article extrait d'un ticket de caisse
  */
 export interface ReceiptItem {
-  name: string;
-  quantity: number;
-  unit_price: number;
-  total_price: number;
+  name?: string;
+  description?: string; // Alias pour name
+  quantity?: number;
+  unit_price?: number;
+  price?: number; // Alias pour unit_price
+  total_price?: number;
+  total?: number; // Alias pour total_price
 }
 
 /**
@@ -42,16 +45,16 @@ export async function analyzeReceipt(
   imageBase64: string
 ): Promise<ReceiptAnalysis> {
   const apiKey = process.env.GEMINI_API_KEY;
-  
+
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY n'est pas configurée");
   }
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  
-  // Utiliser le modèle avec support d'images (sans version)
-  const model = genAI.getGenerativeModel({ 
-    model: "gemini-1.5-flash"
+
+  // Utiliser Gemini 2.5 Flash - modèle stable avec support d'images
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.5-flash"
   });
 
   const prompt = `Analyse ce ticket de caisse et fournis une réponse JSON structurée avec les informations suivantes :
@@ -122,8 +125,7 @@ Réponds UNIQUEMENT avec le JSON, sans texte supplémentaire.`;
   } catch (error) {
     console.error("Erreur lors de l'analyse du ticket:", error);
     throw new Error(
-      `Échec de l'analyse du ticket: ${
-        error instanceof Error ? error.message : "Erreur inconnue"
+      `Échec de l'analyse du ticket: ${error instanceof Error ? error.message : "Erreur inconnue"
       }`
     );
   }

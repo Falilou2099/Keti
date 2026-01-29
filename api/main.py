@@ -1,9 +1,12 @@
 import os
 import re
-import mysql.connector
-from mysql.connector import Error
+import psycopg2
+from psycopg2 import pool
+from psycopg2.extras import RealDictCursor
 import json
-from typing import Dict
+import hashlib
+from functools import lru_cache
+from typing import Dict, Optional
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from azure.ai.formrecognizer import DocumentAnalysisClient
 from azure.core.credentials import AzureKeyCredential
@@ -11,41 +14,89 @@ from mindee import ClientV2, InferenceParameters, BytesInput
 from dotenv import load_dotenv
 load_dotenv()
 
-DB_HOST = os.getenv("DB_HOST")
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME")
+# Configuration de la base de données Neon (PostgreSQL)
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# ============================================================================
+# POOL DE CONNEXIONS (OPTIMISATION PERFORMANCE)
+# ============================================================================
+print("🔧 Initialisation du pool de connexions PostgreSQL...")
+try:
+    connection_pool = pool.SimpleConnectionPool(
+        minconn=2,
+        maxconn=10,
+        dsn=DATABASE_URL
+    )
+    if connection_pool:
+        print("✅ Pool de connexions créé avec succès (min=2, max=10)")
+except Exception as e:
+    print(f"❌ Erreur lors de la création du pool: {e}")
+    connection_pool = None
 
 def get_db_connection():
-    return mysql.connector.connect(
-        host=DB_HOST,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME
-    )
+    """Récupère une connexion depuis le pool"""
+    if connection_pool:
+        return connection_pool.getconn()
+    else:
+        # Fallback si le pool n'est pas disponible
+        return psycopg2.connect(DATABASE_URL)
+
+def release_db_connection(conn):
+    """Libère une connexion vers le pool"""
+    if connection_pool:
+        connection_pool.putconn(conn)
+    else:
+        conn.close()
+
+# ============================================================================
+# CACHE EN MÉMOIRE (OPTIMISATION PERFORMANCE)
+# ============================================================================
+analysis_cache = {}  # Cache simple pour les résultats d'analyse
+CACHE_TTL = 3600  # 1 heure
+
+def get_image_hash(content: bytes) -> str:
+    """Calcule le hash SHA256 d'une image pour le cache"""
+    return hashlib.sha256(content).hexdigest()
+
+def get_cached_result(image_hash: str) -> Optional[Dict]:
+    """Récupère un résultat depuis le cache"""
+    if image_hash in analysis_cache:
+        print(f"✅ Résultat trouvé dans le cache pour {image_hash[:8]}...")
+        return analysis_cache[image_hash]
+    return None
+
+def cache_result(image_hash: str, result: Dict):
+    """Stocke un résultat dans le cache"""
+    analysis_cache[image_hash] = result
+    print(f"💾 Résultat mis en cache pour {image_hash[:8]}...")
+
 
 def save_receipt_to_db(user_id, filename, is_receipt, confidence, extracted_text, mindee_fields, raw_inference):
+    """Sauvegarde un ticket dans la base de données Neon PostgreSQL"""
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    query = """
-    INSERT INTO receipts (user_id, filename, is_receipt, confidence, extracted_text, mindee_fields, raw_inference)
-    VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """
+    try:
+        query = """
+        INSERT INTO receipts (user_id, filename, is_receipt, confidence, extracted_text, mindee_fields, raw_inference)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """
 
-    cursor.execute(query, (
-        user_id,
-        filename,
-        is_receipt,
-        confidence,
-        extracted_text,
-        json.dumps(mindee_fields),
-        raw_inference
-    ))
+        cursor.execute(query, (
+            user_id,
+            filename,
+            is_receipt,
+            confidence,
+            extracted_text,
+            json.dumps(mindee_fields),
+            raw_inference
+        ))
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+        conn.commit()
+    finally:
+        cursor.close()
+        release_db_connection(conn)
+
 
 # ============================================================================
 # CONFIGURATION AZURE (Bloc 1 - Reconnaissance)
@@ -61,8 +112,8 @@ doc_client = DocumentAnalysisClient(
 # ============================================================================
 # CONFIGURATION MINDEE (Bloc 2 - Extraction)
 # ============================================================================
-MINDEE_API_KEY = "md_vHpPefNVwCpfLdRDMV4F0MBaNMQrO5C9NsojQG8MemI"
-MINDEE_MODEL_ID = "43e3cb6a-aade-4793-bb0b-f448836ac276"
+MINDEE_API_KEY = os.getenv("MINDEE_API_KEY")
+MINDEE_MODEL_ID = os.getenv("MINDEE_MODEL_ID")
 
 mindee_client = ClientV2(MINDEE_API_KEY)
 
@@ -80,6 +131,23 @@ SECONDARY_KEYWORDS = [
     "total", "montant", "prix", "€", "eur", "carte",
     "espèces", "especes", "paiement", "merci", "caisse"
 ]
+
+# ============================================================================
+# PRÉ-COMPILATION DES REGEX (OPTIMISATION PERFORMANCE)
+# ============================================================================
+print("🔧 Pré-compilation des patterns regex...")
+COMPILED_MAIN_PATTERNS = {}
+for category, variants in MAIN_KEYWORDS.items():
+    COMPILED_MAIN_PATTERNS[category] = [
+        re.compile(r'\b' + re.escape(variant) + r'\b', re.IGNORECASE)
+        for variant in variants
+    ]
+
+COMPILED_SECONDARY_PATTERNS = [
+    re.compile(r'\b' + re.escape(keyword) + r'\b', re.IGNORECASE)
+    for keyword in SECONDARY_KEYWORDS
+]
+print(f"✅ {len(COMPILED_MAIN_PATTERNS)} catégories principales et {len(COMPILED_SECONDARY_PATTERNS)} mots-clés secondaires compilés")
 
 # ============================================================================
 # FONCTIONS DU BLOC 1 : RECONNAISSANCE
@@ -112,28 +180,26 @@ def extract_text_from_image(content: bytes) -> str:
 
 
 def find_keywords_in_text(text: str) -> Dict:
-    """Recherche les mots-clés dans le texte extrait."""
+    """Recherche les mots-clés dans le texte extrait (version optimisée avec regex pré-compilées)."""
     main_found = []
     keyword_details = {}
     
-    # Chercher les mots-clés principaux
-    for category, variants in MAIN_KEYWORDS.items():
+    # Chercher les mots-clés principaux avec patterns pré-compilés
+    for category, patterns in COMPILED_MAIN_PATTERNS.items():
         found_variants = []
-        for variant in variants:
-            pattern = r'\b' + re.escape(variant) + r'\b'
-            if re.search(pattern, text, re.IGNORECASE):
-                found_variants.append(variant)
+        for i, pattern in enumerate(patterns):
+            if pattern.search(text):
+                found_variants.append(MAIN_KEYWORDS[category][i])
         
         if found_variants:
             main_found.append(category)
             keyword_details[category] = found_variants
     
-    # Chercher les mots-clés secondaires
+    # Chercher les mots-clés secondaires avec patterns pré-compilés
     secondary_found = []
-    for keyword in SECONDARY_KEYWORDS:
-        pattern = r'\b' + re.escape(keyword) + r'\b'
-        if re.search(pattern, text, re.IGNORECASE):
-            secondary_found.append(keyword)
+    for i, pattern in enumerate(COMPILED_SECONDARY_PATTERNS):
+        if pattern.search(text):
+            secondary_found.append(SECONDARY_KEYWORDS[i])
     
     return {
         "main_keywords_found": main_found,

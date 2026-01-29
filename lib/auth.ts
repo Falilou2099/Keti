@@ -30,18 +30,18 @@ function generateToken(): string {
 
 // Users
 export async function createUser(name: string, email: string, password: string): Promise<User | null> {
-  const [existing] = await db.query("SELECT id FROM users WHERE email = ?", [email]);
-  if ((existing as any[]).length > 0) return null;
+  const existing = await db.query("SELECT id FROM users WHERE email = $1", [email]);
+  if (existing.rows.length > 0) return null;
 
   const hash = await bcrypt.hash(password, 10);
 
-  const [result]: any = await db.query(
-    "INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)",
+  const result: any = await db.query(
+    "INSERT INTO users (name, email, password_hash) VALUES ($1, $2, $3) RETURNING id",
     [name, email, hash]
   );
 
   return {
-    id: result.insertId,
+    id: result.rows[0].id,
     name,
     email,
     passwordHash: hash,
@@ -50,13 +50,13 @@ export async function createUser(name: string, email: string, password: string):
 }
 
 export async function findUserByEmail(email: string): Promise<any | null> {
-  const [rows]: any = await db.query("SELECT * FROM users WHERE email = ?", [email]);
-  return rows.length ? rows[0] : null;
+  const result: any = await db.query("SELECT * FROM users WHERE email = $1", [email]);
+  return result.rows.length ? result.rows[0] : null;
 }
 
 export async function findUserById(id: number): Promise<any | null> {
-  const [rows]: any = await db.query("SELECT * FROM users WHERE id = ?", [id]);
-  return rows.length ? rows[0] : null;
+  const result: any = await db.query("SELECT * FROM users WHERE id = $1", [id]);
+  return result.rows.length ? result.rows[0] : null;
 }
 
 export async function verifyPassword(password: string, hash: string): Promise<boolean> {
@@ -68,13 +68,13 @@ export async function createSession(userId: number): Promise<Session> {
   const token = generateToken();
   const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-  const [result]: any = await db.query(
-    "INSERT INTO sessions (user_id, token, expires_at) VALUES (?, ?, ?)",
+  const result: any = await db.query(
+    "INSERT INTO sessions (user_id, token, expires_at) VALUES ($1, $2, $3) RETURNING id",
     [userId, token, expiresAt]
   );
 
   return {
-    id: result.insertId,
+    id: result.rows[0].id,
     userId,
     token,
     expiresAt,
@@ -82,15 +82,15 @@ export async function createSession(userId: number): Promise<Session> {
 }
 
 export async function findSessionByToken(token: string): Promise<any | null> {
-  const [rows]: any = await db.query(
-    "SELECT * FROM sessions WHERE token = ? AND expires_at > NOW()",
+  const result: any = await db.query(
+    "SELECT * FROM sessions WHERE token = $1 AND expires_at > NOW()",
     [token]
   );
-  return rows.length ? rows[0] : null;
+  return result.rows.length ? result.rows[0] : null;
 }
 
 export async function deleteSession(token: string): Promise<void> {
-  await db.query("DELETE FROM sessions WHERE token = ?", [token]);
+  await db.query("DELETE FROM sessions WHERE token = $1", [token]);
 }
 
 // Cookies
@@ -119,4 +119,26 @@ export async function setSessionCookie(token: string): Promise<void> {
 export async function clearSessionCookie(): Promise<void> {
   const cookieStore = await cookies();
   cookieStore.delete("session_token");
+}
+
+// Verify authentication from request
+export async function verifyAuth(request: Request): Promise<{ authenticated: boolean; userId?: number }> {
+  try {
+    const cookieStore = await cookies();
+    const token = cookieStore.get("session_token")?.value;
+
+    if (!token) {
+      return { authenticated: false };
+    }
+
+    const session = await findSessionByToken(token);
+    if (!session) {
+      return { authenticated: false };
+    }
+
+    return { authenticated: true, userId: session.user_id };
+  } catch (error) {
+    console.error("Auth verification error:", error);
+    return { authenticated: false };
+  }
 }

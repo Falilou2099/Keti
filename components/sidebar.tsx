@@ -12,6 +12,7 @@ import {
   HelpCircle,
   LogOut,
   User,
+  Bell,
 } from "lucide-react";
 import { NotificationBell } from "@/components/notification-bell";
 
@@ -27,6 +28,7 @@ export function Sidebar({ onLogout }: SidebarProps) {
     { icon: Receipt, label: "Tickets de caisse", href: "/dashboard/receipts" },
     { icon: CreditCard, label: "Cartes", href: "/dashboard/cards" },
     { icon: PieChart, label: "Statistiques", href: "/dashboard/stats" },
+    { icon: Bell, label: "Alertes", href: "/dashboard/alerts" },
   ];
 
   const isActive = (href: string) => {

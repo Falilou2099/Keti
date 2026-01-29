@@ -3,17 +3,25 @@
 import { useState, useRef, useEffect } from "react";
 import { Bell } from "lucide-react";
 
-const mockNotifications = [
-  { id: 1, text: "Garantie Darty expire dans 7 jours" },
-  { id: 2, text: "Nouveau ticket Fnac ajouté" },
-  { id: 3, text: "Carte AMEX reconnue" },
-];
+interface Notification {
+  id: number;
+  text: string;
+  created_at?: string;
+}
 
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
   const ref = useRef<HTMLDivElement>(null);
 
-  const count = mockNotifications.length;
+  // Récupérer les notifications depuis l'API (pour l'instant vide)
+  useEffect(() => {
+    // TODO: Implémenter une vraie API de notifications
+    // Pour l'instant, on laisse vide
+    setNotifications([]);
+  }, []);
+
+  const count = notifications.length;
   const displayCount = count > 99 ? "99+" : count;
 
   // Fermer quand on clique ailleurs
@@ -44,23 +52,31 @@ export function NotificationBell() {
       </button>
 
       {open && (
-        <div className="absolute left-0 mt-2 w-72 bg-white rounded-xl shadow-lg border z-50">
+        <div className="absolute left-0 mt-2 w-72 bg-white dark:bg-gray-800 rounded-xl shadow-lg border z-50">
           <div className="p-3 border-b font-semibold">Notifications</div>
 
-          <ul className="max-h-64 overflow-auto">
-            {mockNotifications.map((n) => (
-              <li
-                key={n.id}
-                className="px-4 py-3 text-sm hover:bg-secondary cursor-pointer"
-              >
-                {n.text}
-              </li>
-            ))}
-          </ul>
-
-          <div className="p-2 text-center text-xs text-muted-foreground cursor-pointer">
-            Tout marquer comme lu
-          </div>
+          {notifications.length === 0 ? (
+            <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+              <Bell className="w-8 h-8 mx-auto mb-2 opacity-50" />
+              <p>Aucune notification</p>
+            </div>
+          ) : (
+            <>
+              <ul className="max-h-64 overflow-auto">
+                {notifications.map((n) => (
+                  <li
+                    key={n.id}
+                    className="px-4 py-3 text-sm hover:bg-secondary cursor-pointer border-b last:border-b-0"
+                  >
+                    {n.text}
+                  </li>
+                ))}
+              </ul>
+              <div className="p-2 text-center text-xs text-muted-foreground cursor-pointer hover:bg-secondary">
+                Tout marquer comme lu
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

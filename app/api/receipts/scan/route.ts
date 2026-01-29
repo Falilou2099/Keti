@@ -3,40 +3,9 @@ import { analyzeReceipt, validateBase64Image } from "@/lib/gemini";
 import db from "@/lib/db";
 import { verifyAuth } from "@/lib/auth";
 
-// URL de l'API FastAPI de Yann (à configurer selon l'environnement)
-const YANN_API_URL = process.env.YANN_API_URL || "http://localhost:8000";
+// URL de l'API Python Mindee (déjà en cours d'exécution)
+const MINDEE_API_URL = process.env.MINDEE_API_URL || "http://localhost:8000";
 
-/**
- * Appelle l'API de Yann pour extraire les champs détaillés du ticket
- */
-async function callYannAPI(imageBase64: string) {
-  try {
-    // Convertir base64 en Blob pour l'upload
-    const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, "");
-    const buffer = Buffer.from(base64Data, "base64");
-
-    // Créer FormData pour l'upload
-    const formData = new FormData();
-    const blob = new Blob([buffer], { type: "image/jpeg" });
-    formData.append("file", blob, "ticket.jpg");
-
-    // Appeler l'API de Yann
-    const response = await fetch(`${YANN_API_URL}/process-receipt`, {
-      method: "POST",
-      body: formData,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Erreur API Yann: ${response.status}`);
-    }
-
-    const data = await response.json();
-    return data;
-  } catch (error) {
-    console.error("Erreur lors de l'appel à l'API de Yann:", error);
-    return null;
-  }
-}
 
 /**
  * POST /api/receipts/scan
@@ -71,29 +40,19 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ÉTAPE 1 : Analyse du ticket avec Gemini (vérification d'authenticité)
-    console.log("🔍 Étape 1 : Vérification d'authenticité avec Gemini AI...");
+    // ÉTAPE 1 : Analyse du ticket avec Gemini (vérification d'authenticité + extraction)
+    console.log("🔍 Analyse du ticket avec Gemini AI...");
     const analysis = await analyzeReceipt(image);
 
-    // Variable pour stocker les données extraites par Yann
-    let yannData = null;
-
-    // ÉTAPE 2 : Si le ticket est authentique, appeler l'API de Yann
     if (analysis.is_authentic) {
-      console.log("✅ Ticket authentique ! Appel de l'API de Yann pour extraction détaillée...");
-      yannData = await callYannAPI(image);
-
-      if (yannData) {
-        console.log("✅ Extraction réussie par l'API de Yann");
-      } else {
-        console.warn("⚠️ L'API de Yann n'a pas pu extraire les données");
-      }
+      console.log("✅ Ticket authentique détecté !");
     } else {
-      console.log("❌ Ticket non authentique, extraction détaillée ignorée");
+      console.log("❌ Ticket non authentique");
     }
 
-    // ÉTAPE 3 : Enregistrement en base de données
-    const [result]: any = await db.query(
+    // ÉTAPE 2 : Enregistrement en base de données
+    // D'abord insérer le ticket
+    const receiptResult: any = await db.query(
       `INSERT INTO receipts (
         user_id, 
         merchant_name, 
@@ -101,12 +60,11 @@ export async function POST(request: NextRequest) {
         total_amount, 
         is_authentic, 
         confidence_score, 
-        items, 
         suspicious_elements, 
         analysis,
         image_data,
         yann_extraction
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING id, created_at`,
       [
         authResult.userId,
@@ -115,21 +73,43 @@ export async function POST(request: NextRequest) {
         analysis.total_amount,
         analysis.is_authentic,
         analysis.confidence_score,
-        JSON.stringify(analysis.items),
         JSON.stringify(analysis.suspicious_elements),
         analysis.analysis,
         image,
-        yannData ? JSON.stringify(yannData) : null,
+        null, // Pas de données externes, Gemini suffit
       ]
     );
+
+    const receiptId = receiptResult.rows[0].id;
+    const createdAt = receiptResult.rows[0].created_at;
+
+    // Ensuite insérer les articles dans receipt_items
+    if (analysis.items && analysis.items.length > 0) {
+      console.log(`📦 Insertion de ${analysis.items.length} articles...`);
+
+      for (const item of analysis.items) {
+        await db.query(
+          `INSERT INTO receipt_items (receipt_id, name, quantity, unit_price, total_price)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            receiptId,
+            item.name || item.description || 'Article sans nom',
+            item.quantity || null,
+            item.price || null,
+            item.total || null,
+          ]
+        );
+      }
+
+      console.log(`✅ ${analysis.items.length} articles insérés`);
+    }
 
     return NextResponse.json({
       success: true,
       receipt: {
-        id: result[0].id,
-        created_at: result[0].created_at,
+        id: receiptId,
+        created_at: createdAt,
         ...analysis,
-        yann_extraction: yannData,
       },
     });
   } catch (error) {
@@ -164,8 +144,8 @@ export async function GET(request: NextRequest) {
     const limit = parseInt(searchParams.get("limit") || "20");
     const offset = parseInt(searchParams.get("offset") || "0");
 
-    // Récupération des tickets
-    const [rows]: any = await db.query(
+    // Récupération des tickets avec comptage total (OPTIMISATION: une seule requête)
+    const result: any = await db.query(
       `SELECT 
         id,
         merchant_name,
@@ -176,27 +156,32 @@ export async function GET(request: NextRequest) {
         items,
         suspicious_elements,
         analysis,
-        created_at
+        created_at,
+        COUNT(*) OVER() as total_count
       FROM receipts 
-      WHERE user_id = ? 
+      WHERE user_id = $1 
       ORDER BY created_at DESC 
-      LIMIT ? OFFSET ?`,
+      LIMIT $2 OFFSET $3`,
       [authResult.userId, limit, offset]
     );
 
-    // Comptage total
-    const [countRows]: any = await db.query(
-      `SELECT COUNT(*) as total FROM receipts WHERE user_id = ?`,
-      [authResult.userId]
-    );
+    const rows = result.rows || [];
+    const total = rows.length > 0 ? parseInt(rows[0].total_count) : 0;
 
     return NextResponse.json({
       receipts: rows.map((row: any) => ({
-        ...row,
+        id: row.id,
+        merchant_name: row.merchant_name,
+        transaction_date: row.transaction_date,
+        total_amount: row.total_amount,
+        is_authentic: row.is_authentic,
+        confidence_score: row.confidence_score,
+        analysis: row.analysis,
+        created_at: row.created_at,
         items: row.items ? (typeof row.items === 'string' ? JSON.parse(row.items) : row.items) : [],
         suspicious_elements: row.suspicious_elements ? (typeof row.suspicious_elements === 'string' ? JSON.parse(row.suspicious_elements) : row.suspicious_elements) : [],
       })),
-      total: parseInt(countRows[0].total),
+      total,
       limit,
       offset,
     });

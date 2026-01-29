@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef } from "react";
+import imageCompression from "browser-image-compression";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -15,6 +16,7 @@ interface AnalysisResult extends ReceiptAnalysis {
 
 export function ReceiptScanner() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isCompressing, setIsCompressing] = useState(false);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -33,6 +35,28 @@ export function ReceiptScanner() {
   };
 
   /**
+   * Compresse une image pour optimiser l'upload
+   */
+  const compressImage = async (file: File): Promise<File> => {
+    const options = {
+      maxSizeMB: 1,
+      maxWidthOrHeight: 1920,
+      useWebWorker: true,
+      fileType: 'image/jpeg' as const,
+    };
+
+    try {
+      console.log(`📦 Compression de l'image (${(file.size / 1024 / 1024).toFixed(2)}MB)...`);
+      const compressedFile = await imageCompression(file, options);
+      console.log(`✅ Image compressée (${(compressedFile.size / 1024 / 1024).toFixed(2)}MB)`);
+      return compressedFile;
+    } catch (error) {
+      console.error('Erreur lors de la compression:', error);
+      return file; // Retourne le fichier original en cas d'erreur
+    }
+  };
+
+  /**
    * Gère la sélection d'un fichier image
    */
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -45,19 +69,26 @@ export function ReceiptScanner() {
       return;
     }
 
-    // Validation de la taille (max 5MB)
-    if (file.size > 5 * 1024 * 1024) {
-      setError("L'image ne doit pas dépasser 5MB");
+    // Validation de la taille (max 10MB avant compression)
+    if (file.size > 10 * 1024 * 1024) {
+      setError("L'image ne doit pas dépasser 10MB");
       return;
     }
 
     try {
       setError(null);
       setResult(null);
-      const base64 = await fileToBase64(file);
+      setIsCompressing(true);
+
+      // Compresser l'image avant de la convertir en base64
+      const compressedFile = await compressImage(file);
+      setIsCompressing(false);
+
+      const base64 = await fileToBase64(compressedFile);
       setPreviewImage(base64);
       await analyzeReceipt(base64);
     } catch (err) {
+      setIsCompressing(false);
       setError("Erreur lors du chargement de l'image");
       console.error(err);
     }
@@ -172,11 +203,11 @@ export function ReceiptScanner() {
           )}
 
           {/* État de chargement */}
-          {isAnalyzing && (
+          {(isCompressing || isAnalyzing) && (
             <Alert>
               <Loader2 className="h-4 w-4 animate-spin" />
               <AlertDescription>
-                Analyse en cours... L'IA examine votre ticket.
+                {isCompressing ? "Compression de l'image..." : "Analyse en cours... L'IA examine votre ticket."}
               </AlertDescription>
             </Alert>
           )}
