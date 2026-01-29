@@ -1,10 +1,12 @@
-import { Pool } from "pg";
+import mysql from "mysql2/promise";
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+const pool = mysql.createPool({
+  host: "localhost",
+  user: "root",        
+  password: "",        
+  database: "keti",
+  waitForConnections: true,
 });
 
 export default pool;
+
